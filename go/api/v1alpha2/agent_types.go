@@ -40,12 +40,14 @@ const (
 )
 
 // DeclarativeRuntime represents the runtime implementation for declarative agents
-// +kubebuilder:validation:Enum=python;go
+// +kubebuilder:validation:Enum=python;go;claudeCode;codex
 type DeclarativeRuntime string
 
 const (
-	DeclarativeRuntime_Python DeclarativeRuntime = "python"
-	DeclarativeRuntime_Go     DeclarativeRuntime = "go"
+	DeclarativeRuntime_Python    DeclarativeRuntime = "python"
+	DeclarativeRuntime_Go        DeclarativeRuntime = "go"
+	DeclarativeRuntime_ClaudeCode DeclarativeRuntime = "claudeCode"
+	DeclarativeRuntime_Codex     DeclarativeRuntime = "codex"
 )
 
 // AgentSpec defines the desired state of Agent.
@@ -91,6 +93,12 @@ type SkillForAgent struct {
 	// Meant for development and testing purposes only.
 	// +optional
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
+
+	// Reference to a Secret of type kubernetes.io/dockerconfigjson containing
+	// OCI registry credentials. Used by krane in the skills-init container
+	// to authenticate against private registries.
+	// +optional
+	OCIAuthSecretRef *corev1.LocalObjectReference `json:"ociAuthSecretRef,omitempty"`
 
 	// The list of skill images to fetch.
 	// +kubebuilder:validation:MaxItems=20
@@ -221,6 +229,97 @@ type DeclarativeAgentSpec struct {
 	// This includes event compaction (compression) and context caching.
 	// +optional
 	Context *ContextConfig `json:"context,omitempty"`
+
+	// InlineSkills defines prompt-based skills whose content is specified directly
+	// in the Agent spec. Each inline skill is mounted as a SKILL.md file under /skills/<name>/
+	// and discovered by the runtime alongside container-based skills.
+	// +optional
+	// +kubebuilder:validation:MaxItems=20
+	InlineSkills []InlineSkill `json:"inlineSkills,omitempty"`
+
+	// ClaudeCodeConfig holds configuration for the Claude Code CLI runtime.
+	// Only used when Runtime is "claudeCode".
+	// +optional
+	ClaudeCodeConfig *ClaudeCodeRuntimeConfig `json:"claudeCodeConfig,omitempty"`
+
+	// CodexConfig holds configuration for the Codex CLI runtime.
+	// Only used when Runtime is "codex".
+	// +optional
+	CodexConfig *CodexRuntimeConfig `json:"codexConfig,omitempty"`
+}
+
+// InlineSkill defines a prompt-based skill document that is mounted as a SKILL.md
+// file under /skills/<name>/. Skills can reference CLI tools from containers
+// via absolute paths (e.g. /skills/<container-name>/scripts/...).
+type InlineSkill struct {
+	// Name is the unique identifier for this skill. Must be a valid DNS label
+	// (lowercase alphanumeric, dashes, dots). This becomes the directory name under /skills/.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9\.\-]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// Description is a short human-readable summary of what the skill does.
+	// This is embedded in the YAML frontmatter of the generated SKILL.md file.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Description string `json:"description"`
+
+	// Content is the full body of the SKILL.md file (everything after the frontmatter).
+	// Supports Markdown formatting.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Content string `json:"content"`
+}
+
+// ClaudeCodeRuntimeConfig holds configuration specific to the Claude Code CLI runtime.
+type ClaudeCodeRuntimeConfig struct {
+	// Model is the model identifier for Claude Code.
+	Model string `json:"model"`
+	// SystemPrompt is the system prompt for the Claude Code session.
+	// +optional
+	SystemPrompt string `json:"systemPrompt,omitempty"`
+	// Skills is a list of skill names to load.
+	// +optional
+	Skills []string `json:"skills,omitempty"`
+	// MaxTurns limits the number of agentic turns.
+	// +optional
+	MaxTurns *int32 `json:"maxTurns,omitempty"`
+	// AllowedTools restricts which tools Claude Code may invoke.
+	// +optional
+	AllowedTools []string `json:"allowedTools,omitempty"`
+	// ModelConfig is the name of the ModelConfig resource to use.
+	// +optional
+	ModelConfig string `json:"modelConfig,omitempty"`
+	// BaseUrl is the base URL for the API endpoint.
+	// +optional
+	BaseUrl string `json:"baseUrl,omitempty"`
+	// ApiKeySecret is a reference to the secret containing the API key.
+	// +optional
+	ApiKeySecret string `json:"apiKeySecret,omitempty"`
+}
+
+// CodexRuntimeConfig holds configuration specific to the Codex CLI runtime.
+type CodexRuntimeConfig struct {
+	// Model is the model identifier for Codex.
+	Model string `json:"model"`
+	// SystemPrompt is the system prompt for the Codex session.
+	// +optional
+	SystemPrompt string `json:"systemPrompt,omitempty"`
+	// Sandbox specifies the sandbox mode for Codex execution.
+	// +kubebuilder:validation:Enum=docker;firecracker;none
+	// +optional
+	Sandbox string `json:"sandbox,omitempty"`
+	// ModelConfig is the name of the ModelConfig resource to use.
+	// +optional
+	ModelConfig string `json:"modelConfig,omitempty"`
+	// BaseUrl is the base URL for the API endpoint.
+	// +optional
+	BaseUrl string `json:"baseUrl,omitempty"`
+	// ApiKeySecret is a reference to the secret containing the API key.
+	// +optional
+	ApiKeySecret string `json:"apiKeySecret,omitempty"`
 }
 
 // SandboxConfig configures sandboxed execution behavior.
@@ -394,6 +493,20 @@ type SharedDeploymentSpec struct {
 	// Useful for sidecars such as token proxies, log shippers, or security agents.
 	// +optional
 	ExtraContainers []corev1.Container `json:"extraContainers,omitempty"`
+	// CredentialMounts specifies PlatformCredentials to mount as files in the agent container.
+	// The controller resolves each reference to a volume backed by the credential's Secret.
+	// +optional
+	CredentialMounts []CredentialMount `json:"credentialMounts,omitempty"`
+}
+
+// CredentialMount configures a PlatformCredential to be mounted as a file in the agent container.
+type CredentialMount struct {
+	// Name of the PlatformCredential resource (same namespace as the agent).
+	// +kubebuilder:validation:MinLength=1
+	CredentialName string `json:"credentialName"`
+	// MountPath is the directory path where the credential secret will be mounted.
+	// +kubebuilder:validation:MinLength=1
+	MountPath string `json:"mountPath"`
 }
 
 type ServiceAccountConfig struct {
@@ -482,6 +595,14 @@ type McpServerTool struct {
 	// Example: ["x-user-email", "x-tenant-id"]
 	// +optional
 	AllowedHeaders []string `json:"allowedHeaders,omitempty"`
+
+	// SessionTokenLabel enables per-user token injection for this MCP server.
+	// When set, users can call the built-in set_mcp_token tool to store their
+	// personal access token under this label. The token is then injected as
+	// Authorization: Bearer on each MCP tool call, scoped to the current session only.
+	// Example: "github" or "ado"
+	// +optional
+	SessionTokenLabel string `json:"sessionTokenLabel,omitempty"`
 }
 
 type TypedLocalReference struct {
