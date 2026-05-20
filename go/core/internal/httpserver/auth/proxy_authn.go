@@ -57,7 +57,8 @@ func (a *ProxyAuthenticator) Authenticate(ctx context.Context, reqHeaders http.H
 				User:  auth.User{ID: userID},
 				Agent: auth.Agent{ID: agentID},
 			},
-			authHeader: authHeader,
+			authHeader:      authHeader,
+			mcpTokenHeaders: collectMCPTokenHeaders(reqHeaders),
 		}, nil
 	}
 
@@ -74,7 +75,8 @@ func (a *ProxyAuthenticator) Authenticate(ctx context.Context, reqHeaders http.H
 			User:   auth.User{ID: userID},
 			Claims: rawClaims,
 		},
-		authHeader: authHeader,
+		authHeader:      authHeader,
+		mcpTokenHeaders: collectMCPTokenHeaders(reqHeaders),
 	}, nil
 }
 
@@ -94,6 +96,9 @@ func (a *ProxyAuthenticator) UpstreamAuth(r *http.Request, session auth.Session,
 		}
 		if userID := simpleSession.P.User.ID; userID != "" {
 			r.Header.Set("X-User-Id", userID)
+		}
+		for key, value := range simpleSession.mcpTokenHeaders {
+			r.Header.Set(key, value)
 		}
 	}
 	return nil
