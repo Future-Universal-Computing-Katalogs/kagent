@@ -69,6 +69,7 @@ spec:
                 enum:
                 - openclaw
                 - nemoclaw
+                - openshell
                 type: string
               channels:
                 description: Channels configures Telegram and Slack integrations for
@@ -473,6 +474,7 @@ spec:
                     enum:
                     - openclaw
                     - nemoclaw
+                    - openshell
                     type: string
                   id:
                     type: string

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"slices"
@@ -8,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/kagent-dev/kagent/go/api/v1alpha2"
 	"github.com/kagent-dev/kagent/go/core/internal/controller/translator/labels"
@@ -300,4 +302,101 @@ func resolveByoDeployment(agent v1alpha2.AgentObject) (*resolvedDeployment, erro
 	}
 
 	return dep, nil
+}
+
+// sanitizeVolumeName converts a string to a valid DNS-1123 label for use as a K8s volume name.
+func sanitizeVolumeName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	result := b.String()
+	result = strings.Trim(result, "-")
+	if len(result) > 63 {
+		result = result[:63]
+		result = strings.TrimRight(result, "-")
+	}
+	return result
+}
+
+// resolveCredentialMounts looks up PlatformCredential resources referenced by the agent's
+// credentialMounts and appends corresponding volumes/volumeMounts to the deployment.
+// It enforces the credential's AccessPolicy: the requesting agent must be permitted by
+// at least one rule whose principal pattern matches "agent:<name>" (or wildcard).
+func (a *adkApiTranslator) resolveCredentialMounts(ctx context.Context, agent v1alpha2.AgentObject, dep *resolvedDeployment) error {
+	var mounts []v1alpha2.CredentialMount
+
+	spec := agent.GetAgentSpec()
+	switch spec.Type {
+	case v1alpha2.AgentType_Declarative:
+		if spec.Declarative != nil && spec.Declarative.Deployment != nil {
+			mounts = spec.Declarative.Deployment.CredentialMounts
+		}
+	case v1alpha2.AgentType_BYO:
+		if spec.BYO != nil && spec.BYO.Deployment != nil {
+			mounts = spec.BYO.Deployment.CredentialMounts
+		}
+	}
+
+	if len(mounts) == 0 {
+		return nil
+	}
+
+	agentName := agent.GetName()
+	namespace := agent.GetNamespace()
+	for _, m := range mounts {
+		cred := &v1alpha2.PlatformCredential{}
+		key := types.NamespacedName{Name: m.CredentialName, Namespace: namespace}
+		if err := a.kube.Get(ctx, key, cred); err != nil {
+			return fmt.Errorf("failed to get PlatformCredential %q: %w", m.CredentialName, err)
+		}
+		if cred.Spec.Source.SecretRef == nil {
+			return fmt.Errorf("PlatformCredential %q has no secretRef", m.CredentialName)
+		}
+		if !agentMatchesAccessPolicy(cred.Spec.AccessPolicy, agentName) {
+			return fmt.Errorf("agent %q is not permitted by AccessPolicy of PlatformCredential %q", agentName, m.CredentialName)
+		}
+
+		volName := sanitizeVolumeName(fmt.Sprintf("cred-%s", m.CredentialName))
+		defaultMode := int32(0444)
+		dep.Volumes = append(dep.Volumes, corev1.Volume{
+			Name: volName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  cred.Spec.Source.SecretRef.Name,
+					DefaultMode: &defaultMode,
+				},
+			},
+		})
+		dep.VolumeMounts = append(dep.VolumeMounts, corev1.VolumeMount{
+			Name:      volName,
+			MountPath: m.MountPath,
+			ReadOnly:  true,
+		})
+	}
+	return nil
+}
+
+// agentMatchesAccessPolicy reports whether any rule's principal patterns admit the agent.
+// An empty policy denies by default (matching broker semantics).
+func agentMatchesAccessPolicy(rules []v1alpha2.AccessPolicyRule, agentName string) bool {
+	for _, rule := range rules {
+		for _, pattern := range rule.Principals {
+			if pattern == "*" {
+				return true
+			}
+			parts := strings.SplitN(pattern, ":", 2)
+			if len(parts) != 2 || parts[0] != "agent" {
+				continue
+			}
+			if parts[1] == "*" || parts[1] == agentName {
+				return true
+			}
+		}
+	}
+	return false
 }
