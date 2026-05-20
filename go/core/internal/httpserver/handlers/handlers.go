@@ -23,12 +23,16 @@ type Handlers struct {
 	ToolServerTypes     *ToolServerTypesHandler
 	Memory              *MemoryHandler
 	Feedback            *FeedbackHandler
+	Comments            *CommentsHandler
 	Namespaces          *NamespacesHandler
 	PromptTemplates     *PromptTemplatesHandler
 	Tasks               *TasksHandler
 	Checkpoints         *CheckpointsHandler
 	CrewAI              *CrewAIHandler
 	CurrentUser         *CurrentUserHandler
+	ScheduledRuns       *ScheduledRunsHandler
+	Stats               *StatsHandler
+	Credentials         *CredentialsHandler
 }
 
 // Base holds common dependencies for all handlers
@@ -40,10 +44,11 @@ type Base struct {
 	ProxyURL           string
 	WatchedNamespaces  []string
 	SandboxBackend     sandboxbackend.Backend
+	RefChecker         *ReferenceChecker
 }
 
 // NewHandlers creates a new Handlers instance with all handler components.
-func NewHandlers(kubeClient client.Client, defaultModelConfig types.NamespacedName, dbService database.Client, watchedNamespaces []string, authorizer auth.Authorizer, proxyURL string, rcnclr reconciler.KagentReconciler, sandboxBackend sandboxbackend.Backend) *Handlers {
+func NewHandlers(kubeClient client.Client, defaultModelConfig types.NamespacedName, dbService database.Client, watchedNamespaces []string, authorizer auth.Authorizer, proxyURL string, rcnclr reconciler.KagentReconciler, sandboxBackend sandboxbackend.Backend, scheduledRunTrigger ScheduledRunTrigger) *Handlers {
 	base := &Base{
 		KubeClient:         kubeClient,
 		DefaultModelConfig: defaultModelConfig,
@@ -52,6 +57,12 @@ func NewHandlers(kubeClient client.Client, defaultModelConfig types.NamespacedNa
 		ProxyURL:           proxyURL,
 		WatchedNamespaces:  watchedNamespaces,
 		SandboxBackend:     sandboxBackend,
+		RefChecker: &ReferenceChecker{
+			Sources: []ReferenceSource{
+				&ScheduledRunReferenceSource{},
+				&AgentToolReferenceSource{},
+			},
+		},
 	}
 
 	return &Handlers{
@@ -66,11 +77,15 @@ func NewHandlers(kubeClient client.Client, defaultModelConfig types.NamespacedNa
 		ToolServerTypes:     NewToolServerTypesHandler(base),
 		Memory:              NewMemoryHandler(base),
 		Feedback:            NewFeedbackHandler(base),
+		Comments:            NewCommentsHandler(base),
 		Namespaces:          NewNamespacesHandler(base),
 		PromptTemplates:     NewPromptTemplatesHandler(base),
 		Tasks:               NewTasksHandler(base),
 		Checkpoints:         NewCheckpointsHandler(base),
 		CrewAI:              NewCrewAIHandler(base),
 		CurrentUser:         NewCurrentUserHandler(),
+		ScheduledRuns:       NewScheduledRunsHandler(base, scheduledRunTrigger),
+		Stats:               NewStatsHandler(base),
+		Credentials:         NewCredentialsHandler(base),
 	}
 }
