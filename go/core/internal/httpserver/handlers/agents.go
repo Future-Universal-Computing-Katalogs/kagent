@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -41,6 +42,8 @@ func (h *AgentsHandler) HandleListAgents(w ErrorResponseWriter, r *http.Request)
 		return
 	}
 
+	userID, _ := GetUserID(r)
+
 	agentList := &v1alpha2.AgentList{}
 	if err := h.KubeClient.List(r.Context(), agentList); err != nil {
 		w.RespondWithError(errors.NewInternalServerError("Failed to list Agents from Kubernetes", err))
@@ -52,15 +55,20 @@ func (h *AgentsHandler) HandleListAgents(w ErrorResponseWriter, r *http.Request)
 
 	harnessList := &v1alpha2.AgentHarnessList{}
 	if err := h.KubeClient.List(r.Context(), harnessList); err != nil {
-		w.RespondWithError(errors.NewInternalServerError("Failed to list AgentHarness resources from Kubernetes", err))
-		return
-	}
-	for i := range harnessList.Items {
-		sb := &harnessList.Items[i]
-		if sb.Spec.Backend != v1alpha2.AgentHarnessBackendOpenClaw && sb.Spec.Backend != v1alpha2.AgentHarnessBackendNemoClaw {
-			continue
+		log.V(1).Info("AgentHarness CRD not available, skipping", "error", err)
+	} else {
+		for i := range harnessList.Items {
+			sb := &harnessList.Items[i]
+			if sb.Spec.Backend != v1alpha2.AgentHarnessBackendOpenshell && sb.Spec.Backend != v1alpha2.AgentHarnessBackendOpenClaw && sb.Spec.Backend != v1alpha2.AgentHarnessBackendNemoClaw {
+				continue
+			}
+			agentsWithID = append(agentsWithID, h.openshellAgentHarnessAgentResponse(r.Context(), log, sb))
 		}
-		agentsWithID = append(agentsWithID, h.openshellAgentHarnessAgentResponse(r.Context(), log, sb))
+	}
+
+	// Filter by visibility: only show agents the user is allowed to see
+	if userID != "" {
+		agentsWithID = filterAgentsByVisibility(agentsWithID, userID)
 	}
 
 	log.Info("Successfully listed agents", "count", len(agentsWithID))
@@ -193,6 +201,7 @@ func (h *AgentsHandler) getAgentResponse(ctx context.Context, log logr.Logger, a
 	log.V(1).Info("Processing Agent", "agentRef", agentRef)
 	spec := agent.GetAgentSpec()
 	status := agent.GetAgentStatus()
+	agentID := utils.ConvertToPythonIdentifier(agentRef)
 
 	deploymentReady := false
 	for _, condition := range status.Conditions {
@@ -214,11 +223,44 @@ func (h *AgentsHandler) getAgentResponse(ctx context.Context, log logr.Logger, a
 	}
 
 	response := api.AgentResponse{
-		ID:              utils.ConvertToPythonIdentifier(agentRef),
+		ID:              agentID,
 		Agent:           api.AgentResourceFrom(agent),
+		UserID:          utils.DefaultAgentUserID,
+		PrivateMode:     utils.DefaultAgentPrivateMode,
+		Visibility:      utils.DefaultAgentVisibility,
 		DeploymentReady: deploymentReady,
 		Accepted:        accepted,
 		WorkloadMode:    agent.GetWorkloadMode(),
+	}
+
+	if annotations := agent.GetAnnotations(); annotations != nil {
+		if userID, ok := annotations[utils.AgentUserIDAnnotation]; ok && userID != "" {
+			response.UserID = userID
+		}
+		if rawPrivateMode, ok := annotations[utils.AgentPrivateModeAnnotation]; ok {
+			if parsedPrivateMode, err := strconv.ParseBool(rawPrivateMode); err == nil {
+				response.PrivateMode = parsedPrivateMode
+			}
+		}
+		if v, ok := annotations[utils.AgentVisibilityAnnotation]; ok && v != "" {
+			response.Visibility = v
+		}
+		if raw, ok := annotations[utils.AgentSharedWithAnnotation]; ok && raw != "" {
+			for _, u := range strings.Split(raw, ",") {
+				if trimmed := strings.TrimSpace(u); trimmed != "" {
+					response.SharedWith = append(response.SharedWith, trimmed)
+				}
+			}
+		}
+	}
+
+	if dbAgent, err := h.DatabaseService.GetAgent(ctx, agentID); err == nil && dbAgent != nil {
+		response.UserID = dbAgent.UserID
+		response.PrivateMode = dbAgent.PrivateMode
+		response.Visibility = dbAgent.Visibility
+		response.SharedWith = dbAgent.SharedWith
+	} else if err != nil {
+		log.V(1).Info("Agent not found in database; using metadata/default access state", "agentID", agentID, "error", err.Error())
 	}
 
 	if spec.Type == v1alpha2.AgentType_Declarative && spec.Declarative != nil {
@@ -228,11 +270,7 @@ func (h *AgentsHandler) getAgentResponse(ctx context.Context, log logr.Logger, a
 			Namespace: agent.GetNamespace(),
 			Name:      spec.Declarative.ModelConfig,
 		}
-		if err := h.KubeClient.Get(
-			ctx,
-			objKey,
-			modelConfig,
-		); err != nil {
+		if err := h.KubeClient.Get(ctx, objKey, modelConfig); err != nil {
 			if apierrors.IsNotFound(err) {
 				log.V(1).Info("ModelConfig not found", "modelConfigRef", objKey)
 			} else {
@@ -393,6 +431,13 @@ func (h *AgentsHandler) handleDeleteAgentObject(
 		return
 	}
 
+	// Check if the agent is referenced by other resources
+	agentRef := types.NamespacedName{Namespace: agentNamespace, Name: agentName}
+	if err := h.RefChecker.CheckDeletionAllowed(r.Context(), h.KubeClient, agentRef); err != nil {
+		w.RespondWithError(errors.NewConflictError(err.Error(), nil))
+		return
+	}
+
 	if err := h.KubeClient.Delete(r.Context(), agent); err != nil {
 		w.RespondWithError(errors.NewInternalServerError(deleteFailedMsg, err))
 		return
@@ -451,6 +496,14 @@ func (h *AgentsHandler) handleCreateAgentObject(
 		w.RespondWithError(err)
 		return
 	}
+
+	userID, uidErr := GetUserID(r)
+	if uidErr != nil {
+		w.RespondWithError(errors.NewBadRequestError("Failed to get user ID", uidErr))
+		return
+	}
+	setAgentAccessMetadata(agent, agent.GetAnnotations(), userID)
+
 	if err = h.KubeClient.Create(r.Context(), agent); err != nil {
 		w.RespondWithError(errors.NewInternalServerError("Failed to create Agent in Kubernetes", err))
 		return
@@ -527,10 +580,36 @@ func (h *AgentsHandler) handleUpdateAgentObject(
 
 	*existing.GetAgentSpec() = *incoming.GetAgentSpec()
 
+	// Merge labels from the incoming request (e.g. category, tool-type)
+	if incomingLabels := incoming.GetLabels(); len(incomingLabels) > 0 {
+		existingLabels := existing.GetLabels()
+		if existingLabels == nil {
+			existingLabels = make(map[string]string)
+		}
+		for k, v := range incomingLabels {
+			existingLabels[k] = v
+		}
+		existing.SetLabels(existingLabels)
+	}
+
+	userID, uidErr := GetUserID(r)
+	if uidErr != nil {
+		w.RespondWithError(errors.NewBadRequestError("Failed to get user ID", uidErr))
+		return
+	}
+	setAgentAccessMetadata(existing, incoming.GetAnnotations(), userID)
+
 	if err := h.validateAgentObject(r.Context(), existing); err != nil {
 		w.RespondWithError(err)
 		return
 	}
+
+	// Check if the agent is actively referenced (non-suspended ScheduledRuns or Agent-as-Tool)
+	if err := h.RefChecker.CheckEditAllowed(r.Context(), h.KubeClient, agentRef); err != nil {
+		w.RespondWithError(errors.NewConflictError(err.Error(), nil))
+		return
+	}
+
 	if err := h.KubeClient.Update(r.Context(), existing); err != nil {
 		w.RespondWithError(errors.NewInternalServerError(updateFailedMsg, err))
 		return
@@ -761,4 +840,112 @@ func (h *AgentsHandler) HandleDeleteSandboxAgent(w ErrorResponseWriter, r *http.
 		"Failed to delete SandboxAgent",
 		"Successfully deleted sandbox agent",
 	)
+}
+
+func setAgentAccessMetadata(agent client.Object, sourceAnnotations map[string]string, userID string) {
+	privateMode := utils.DefaultAgentPrivateMode
+	if rawPrivateMode, ok := sourceAnnotations[utils.AgentPrivateModeAnnotation]; ok {
+		if parsedPrivateMode, err := strconv.ParseBool(rawPrivateMode); err == nil {
+			privateMode = parsedPrivateMode
+		}
+	}
+
+	visibility := utils.DefaultAgentVisibility
+	if v, ok := sourceAnnotations[utils.AgentVisibilityAnnotation]; ok && v != "" {
+		visibility = v
+	}
+
+	annotations := agent.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+
+	annotations[utils.AgentUserIDAnnotation] = userID
+	annotations[utils.AgentPrivateModeAnnotation] = strconv.FormatBool(privateMode)
+	annotations[utils.AgentVisibilityAnnotation] = visibility
+	if sw, ok := sourceAnnotations[utils.AgentSharedWithAnnotation]; ok {
+		annotations[utils.AgentSharedWithAnnotation] = sw
+	}
+	agent.SetAnnotations(annotations)
+}
+
+// filterAgentsByVisibility filters a list of agent responses based on visibility rules.
+func filterAgentsByVisibility(agents []api.AgentResponse, userID string) []api.AgentResponse {
+	filtered := make([]api.AgentResponse, 0, len(agents))
+	for _, a := range agents {
+		switch a.Visibility {
+		case "public":
+			filtered = append(filtered, a)
+		case "shared":
+			if a.UserID == userID || containsStr(a.SharedWith, userID) {
+				filtered = append(filtered, a)
+			}
+		default: // "private" or empty
+			if a.UserID == userID {
+				filtered = append(filtered, a)
+			}
+		}
+	}
+	return filtered
+}
+
+func containsStr(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// HandleUpdateAgentVisibility handles PUT /api/agents/{namespace}/{name}/visibility requests.
+func (h *AgentsHandler) HandleUpdateAgentVisibility(w ErrorResponseWriter, r *http.Request) {
+	log := ctrllog.FromContext(r.Context()).WithName("agents-handler").WithValues("operation", "update-visibility")
+
+	userID, err := GetUserID(r)
+	if err != nil {
+		w.RespondWithError(errors.NewBadRequestError("Failed to get user ID", err))
+		return
+	}
+
+	var req api.UpdateVisibilityRequest
+	if err := DecodeJSONBody(r, &req); err != nil {
+		w.RespondWithError(errors.NewBadRequestError("Invalid request body", err))
+		return
+	}
+
+	// Validate visibility value
+	switch req.Visibility {
+	case "private", "shared", "public":
+	default:
+		w.RespondWithError(errors.NewBadRequestError("Invalid visibility value; must be private, shared, or public", fmt.Errorf("got: %s", req.Visibility)))
+		return
+	}
+	if req.Visibility == "shared" && len(req.SharedWith) == 0 {
+		w.RespondWithError(errors.NewBadRequestError("shared_with is required when visibility is shared", nil))
+		return
+	}
+
+	namespace, err := GetPathParam(r, "namespace")
+	if err != nil {
+		w.RespondWithError(errors.NewBadRequestError("Missing namespace", err))
+		return
+	}
+	name, err := GetPathParam(r, "name")
+	if err != nil {
+		w.RespondWithError(errors.NewBadRequestError("Missing name", err))
+		return
+	}
+
+	agentID := utils.ConvertToPythonIdentifier(namespace + "/" + name)
+
+	// Only the owner can update visibility
+	if err := h.DatabaseService.UpdateAgentVisibility(r.Context(), agentID, userID, req.Visibility, req.SharedWith); err != nil {
+		log.Error(err, "Failed to update agent visibility", "agentID", agentID)
+		w.RespondWithError(errors.NewInternalServerError("Failed to update visibility", err))
+		return
+	}
+
+	log.Info("Updated agent visibility", "agentID", agentID, "visibility", req.Visibility)
+	RespondWithJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

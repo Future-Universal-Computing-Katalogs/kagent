@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -541,6 +542,9 @@ func (a *kagentReconciler) ReconcileKagentMCPServer(ctx context.Context, req ctr
 		Description: "N/A",
 		GroupKind:   schema.GroupKind{Group: "kagent.dev", Kind: "MCPServer"}.String(),
 	}
+	if uid := strings.TrimSpace(mcpServer.GetAnnotations()[utils.AgentUserIDAnnotation]); uid != "" {
+		dbServer.UserID = &uid
+	}
 
 	// Convert MCPServer to RemoteMCPServer spec
 	remoteSpec, err := agent_translator.ConvertMCPServerToRemoteMCPServer(mcpServer)
@@ -592,6 +596,9 @@ func (a *kagentReconciler) ReconcileKagentRemoteMCPServer(ctx context.Context, r
 		Name:        serverRef,
 		Description: server.Spec.Description,
 		GroupKind:   server.GroupVersionKind().GroupKind().String(),
+	}
+	if uid := strings.TrimSpace(server.GetAnnotations()[utils.AgentUserIDAnnotation]); uid != "" {
+		dbServer.UserID = &uid
 	}
 
 	l.Info("registering remote MCP server", "url", server.Spec.URL, "protocol", server.Spec.Protocol)
@@ -964,11 +971,40 @@ func (a *kagentReconciler) upsertAgent(ctx context.Context, agent v1alpha2.Agent
 	if agent.GetWorkloadMode() == v1alpha2.WorkloadModeSandbox {
 		dbType = "SandboxAgent"
 	}
+	userID := utils.DefaultAgentUserID
+	privateMode := false
+	visibility := utils.DefaultAgentVisibility
+	var sharedWith []string
+	if annotations := agent.GetAnnotations(); annotations != nil {
+		if rawUserID := strings.TrimSpace(annotations[utils.AgentUserIDAnnotation]); rawUserID != "" {
+			userID = rawUserID
+		}
+		if rawPrivateMode, ok := annotations[utils.AgentPrivateModeAnnotation]; ok {
+			if parsedPrivateMode, err := strconv.ParseBool(rawPrivateMode); err == nil {
+				privateMode = parsedPrivateMode
+			}
+		}
+		if v, ok := annotations[utils.AgentVisibilityAnnotation]; ok && v != "" {
+			visibility = v
+		}
+		if raw, ok := annotations[utils.AgentSharedWithAnnotation]; ok && raw != "" {
+			for _, u := range strings.Split(raw, ",") {
+				if trimmed := strings.TrimSpace(u); trimmed != "" {
+					sharedWith = append(sharedWith, trimmed)
+				}
+			}
+		}
+	}
+
 	dbAgent := &database.Agent{
 		ID:           id,
 		Type:         dbType,
 		WorkloadType: agent.GetWorkloadMode(),
 		Config:       agentOutputs.Config,
+		UserID:       userID,
+		PrivateMode:  privateMode,
+		Visibility:   visibility,
+		SharedWith:   sharedWith,
 	}
 
 	if err := a.dbClient.StoreAgent(ctx, dbAgent); err != nil {

@@ -9,8 +9,33 @@ import (
 	"context"
 )
 
+const getPinnedSession = `-- name: GetPinnedSession :one
+SELECT id, user_id, name, created_at, updated_at, deleted_at, agent_id, source, pinned, visibility, shared_with FROM session
+WHERE id = $1 AND pinned = true AND deleted_at IS NULL
+LIMIT 1
+`
+
+func (q *Queries) GetPinnedSession(ctx context.Context, id string) (Session, error) {
+	row := q.db.QueryRow(ctx, getPinnedSession, id)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Name,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.AgentID,
+		&i.Source,
+		&i.Pinned,
+		&i.Visibility,
+		&i.SharedWith,
+	)
+	return i, err
+}
+
 const getSession = `-- name: GetSession :one
-SELECT id, user_id, name, created_at, updated_at, deleted_at, agent_id, source FROM session
+SELECT id, user_id, name, created_at, updated_at, deleted_at, agent_id, source, pinned, visibility, shared_with FROM session
 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
 LIMIT 1
 `
@@ -32,12 +57,15 @@ func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (Session
 		&i.DeletedAt,
 		&i.AgentID,
 		&i.Source,
+		&i.Pinned,
+		&i.Visibility,
+		&i.SharedWith,
 	)
 	return i, err
 }
 
 const listSessions = `-- name: ListSessions :many
-SELECT id, user_id, name, created_at, updated_at, deleted_at, agent_id, source FROM session
+SELECT id, user_id, name, created_at, updated_at, deleted_at, agent_id, source, pinned, visibility, shared_with FROM session
 WHERE user_id = $1 AND deleted_at IS NULL
 ORDER BY updated_at DESC, created_at DESC
 `
@@ -60,6 +88,9 @@ func (q *Queries) ListSessions(ctx context.Context, userID string) ([]Session, e
 			&i.DeletedAt,
 			&i.AgentID,
 			&i.Source,
+			&i.Pinned,
+			&i.Visibility,
+			&i.SharedWith,
 		); err != nil {
 			return nil, err
 		}
@@ -72,9 +103,10 @@ func (q *Queries) ListSessions(ctx context.Context, userID string) ([]Session, e
 }
 
 const listSessionsForAgent = `-- name: ListSessionsForAgent :many
-SELECT id, user_id, name, created_at, updated_at, deleted_at, agent_id, source FROM session
-WHERE agent_id = $1 AND user_id = $2 AND deleted_at IS NULL
+SELECT id, user_id, name, created_at, updated_at, deleted_at, agent_id, source, pinned, visibility, shared_with FROM session
+WHERE agent_id = $1 AND deleted_at IS NULL
   AND (source IS NULL OR source != 'agent')
+  AND (user_id = $2 OR pinned = true)
 ORDER BY updated_at DESC, created_at DESC
 `
 
@@ -101,6 +133,9 @@ func (q *Queries) ListSessionsForAgent(ctx context.Context, arg ListSessionsForA
 			&i.DeletedAt,
 			&i.AgentID,
 			&i.Source,
+			&i.Pinned,
+			&i.Visibility,
+			&i.SharedWith,
 		); err != nil {
 			return nil, err
 		}
@@ -113,7 +148,7 @@ func (q *Queries) ListSessionsForAgent(ctx context.Context, arg ListSessionsForA
 }
 
 const listSessionsForAgentAllUsers = `-- name: ListSessionsForAgentAllUsers :many
-SELECT id, user_id, name, created_at, updated_at, deleted_at, agent_id, source FROM session
+SELECT id, user_id, name, created_at, updated_at, deleted_at, agent_id, source, pinned, visibility, shared_with FROM session
 WHERE agent_id = $1 AND deleted_at IS NULL
   AND (source IS NULL OR source != 'agent')
 ORDER BY updated_at DESC, created_at DESC
@@ -137,6 +172,102 @@ func (q *Queries) ListSessionsForAgentAllUsers(ctx context.Context, agentID *str
 			&i.DeletedAt,
 			&i.AgentID,
 			&i.Source,
+			&i.Pinned,
+			&i.Visibility,
+			&i.SharedWith,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSessionsForAgentVisible = `-- name: ListSessionsForAgentVisible :many
+SELECT id, user_id, name, created_at, updated_at, deleted_at, agent_id, source, pinned, visibility, shared_with FROM session
+WHERE agent_id = $1 AND deleted_at IS NULL
+  AND (source IS NULL OR source != 'agent')
+  AND (
+    user_id = $2
+    OR pinned = true
+    OR visibility = 'public'
+    OR (visibility = 'shared' AND $2 = ANY(shared_with))
+  )
+ORDER BY created_at ASC
+`
+
+type ListSessionsForAgentVisibleParams struct {
+	AgentID *string
+	UserID  string
+}
+
+func (q *Queries) ListSessionsForAgentVisible(ctx context.Context, arg ListSessionsForAgentVisibleParams) ([]Session, error) {
+	rows, err := q.db.Query(ctx, listSessionsForAgentVisible, arg.AgentID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Session
+	for rows.Next() {
+		var i Session
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Name,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+			&i.AgentID,
+			&i.Source,
+			&i.Pinned,
+			&i.Visibility,
+			&i.SharedWith,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSessionsVisible = `-- name: ListSessionsVisible :many
+SELECT id, user_id, name, created_at, updated_at, deleted_at, agent_id, source, pinned, visibility, shared_with FROM session
+WHERE deleted_at IS NULL AND (
+    visibility = 'public'
+    OR user_id = $1
+    OR (visibility = 'shared' AND $1 = ANY(shared_with))
+    OR pinned = true
+)
+ORDER BY created_at ASC
+`
+
+func (q *Queries) ListSessionsVisible(ctx context.Context, userID string) ([]Session, error) {
+	rows, err := q.db.Query(ctx, listSessionsVisible, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Session
+	for rows.Next() {
+		var i Session
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Name,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+			&i.AgentID,
+			&i.Source,
+			&i.Pinned,
+			&i.Visibility,
+			&i.SharedWith,
 		); err != nil {
 			return nil, err
 		}
@@ -164,21 +295,27 @@ func (q *Queries) SoftDeleteSession(ctx context.Context, arg SoftDeleteSessionPa
 }
 
 const upsertSession = `-- name: UpsertSession :exec
-INSERT INTO session (id, user_id, name, agent_id, source, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+INSERT INTO session (id, user_id, name, agent_id, source, pinned, visibility, shared_with, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
 ON CONFLICT (id, user_id) DO UPDATE SET
     name       = EXCLUDED.name,
     agent_id   = EXCLUDED.agent_id,
     source     = EXCLUDED.source,
+    pinned     = EXCLUDED.pinned,
+    visibility = EXCLUDED.visibility,
+    shared_with = EXCLUDED.shared_with,
     updated_at = NOW()
 `
 
 type UpsertSessionParams struct {
-	ID      string
-	UserID  string
-	Name    *string
-	AgentID *string
-	Source  *string
+	ID         string
+	UserID     string
+	Name       *string
+	AgentID    *string
+	Source     *string
+	Pinned     bool
+	Visibility string
+	SharedWith []string
 }
 
 func (q *Queries) UpsertSession(ctx context.Context, arg UpsertSessionParams) error {
@@ -188,6 +325,9 @@ func (q *Queries) UpsertSession(ctx context.Context, arg UpsertSessionParams) er
 		arg.Name,
 		arg.AgentID,
 		arg.Source,
+		arg.Pinned,
+		arg.Visibility,
+		arg.SharedWith,
 	)
 	return err
 }
