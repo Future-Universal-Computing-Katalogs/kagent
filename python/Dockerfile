@@ -10,8 +10,7 @@ ARG DISABLE_SSL_VERIFY=0
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 
-# Install packages with conditional SSL verification
-# When DISABLE_SSL_VERIFY=1, use --no-check-certificate to bypass SSL checks (development only)
+# Install system packages + uv (not in Alpine repos, use standalone installer)
 RUN --mount=type=cache,target=/var/cache/apk,rw \
     if [ "$DISABLE_SSL_VERIFY" = "1" ]; then \
         echo "WARNING: Disabling SSL verification for apk (development only)"; \
@@ -67,8 +66,8 @@ RUN addgroup -g 1001 pythongroup                           && \
 
 # Install anthropic sandbox runtime and dependencies
 RUN --mount=type=cache,target=/var/cache/apk,rw \
-    apk add \
-    nodejs npm node-gyp bubblewrap socat ripgrep
+    apk add --no-cache \
+    nodejs npm python3 make g++ bubblewrap socat ripgrep
 
 # Install sandbox runtime from a specific commit of the GitHub repo without using global prefix
 # This avoids scope-related rename issues in global node_modules
@@ -137,4 +136,4 @@ ENV VIRTUAL_ENV=/.kagent/.venv
 
 WORKDIR /app
 
-ENTRYPOINT ["kagent-adk", "run", "--host", "0.0.0.0", "--port", "8080"]
+ENTRYPOINT ["kagent-adk", "static", "--host", "0.0.0.0", "--port", "8080"]

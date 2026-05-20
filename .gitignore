@@ -5,6 +5,30 @@ values.local.yaml
 
 test_results
 
+# Local cluster operations (deploy scripts, secrets, binaries, demos)
+.local/
+
+# Belt-and-suspenders: never commit kubeconfigs / deploy infra outside .local/
+**/kubeconfigs/
+KC/
+deploy.sh
+*.kubeconfig
+.DS_Store
+
+# Secrets / credentials (defense-in-depth; .local/ already gitignored)
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.token
+id_rsa*
+**/secrets/
+**/credentials*
+service-account*.json
+.env.*
+!.env.example
+
 ### Go template
 # If you prefer the allow list template instead of the deny list, see community template:
 # https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
@@ -214,3 +238,6 @@ file::memory:*
 ## Test certificates
 python/packages/kagent-adk/tests/fixtures/certs/*.pem
 python/packages/kagent-adk/tests/fixtures/certs/*.srl
+.local-build/
+migration-output/
+docker/skills-init/bin/
